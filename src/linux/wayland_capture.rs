@@ -1,21 +1,23 @@
-use std::{collections::HashMap, env::temp_dir, fmt::Debug, fs, sync::Mutex};
+use std::{collections::HashMap, fmt::Debug, fs, sync::Mutex};
+use std::os::unix::io::{FromRawFd, AsRawFd};
+use std::io::Read;
 
 use image::RgbaImage;
 use scopeguard::defer;
 use serde::Deserialize;
 use zbus::{
     blocking::{Connection, Proxy},
-    zvariant::{Type, Value},
+    zvariant::{OwnedFd, Type, Value},
 };
 
 use crate::{
-    error::XCapResult,
+    error::{XCapError, XCapResult},
     platform::utils::{get_zbus_portal_request, safe_uri_to_path, wait_zbus_response},
 };
 
 use super::utils::{get_zbus_connection, png_to_rgba_image};
 
-fn org_gnome_shell_screenshot(
+fn org_gnome_shell_screencast(
     conn: &Connection,
     x: i32,
     y: i32,
@@ -24,30 +26,37 @@ fn org_gnome_shell_screenshot(
 ) -> XCapResult<RgbaImage> {
     let proxy = Proxy::new(
         conn,
-        "org.gnome.Shell.Screenshot",
-        "/org/gnome/Shell/Screenshot",
-        "org.gnome.Shell.Screenshot",
+        "org.gnome.Shell.Screencast",
+        "/org/gnome/Shell/Screencast",
+        "org.gnome.Shell.Screencast",
     )?;
 
-    let filename = rand::random::<u32>();
+    // Create options for the screencast
+    let mut options = HashMap::new();
+    options.insert("draw-cursor", Value::from(false));
+    options.insert("framerate", Value::from(1u32)); // Single frame
+    // Use a pipeline that outputs raw RGBA pixels
+    let pipeline = format!(
+        "videoconvert ! video/x-raw,format=RGBA ! videoconvert ! appsink name=sink sync=false",
+    );
+    options.insert("pipeline", Value::from(pipeline.as_str()));
+    
+    // Start the screencast and get the raw pixel data
+    let response: (bool, OwnedFd) = proxy.call("ScreencastArea", &(x, y, width, height, options))?;
+    
+    if !response.0 {
+        return Err(XCapError::new("Failed to capture screen area"));
+    }
 
-    let dirname = temp_dir().join("screenshot");
-    fs::create_dir_all(&dirname)?;
+    // Read the raw RGBA pixels from the pipe
+    let fd = response.1;
+    let mut buffer = vec![0u8; (width * height * 4) as usize];
+    let mut file = unsafe { std::fs::File::from_raw_fd(fd.as_raw_fd()) };
+    file.read_exact(&mut buffer)?;
 
-    let mut path = dirname.join(filename.to_string());
-    path.set_extension("png");
-    defer!({
-        let _ = fs::remove_file(&path);
-    });
-
-    let filename = path.to_string_lossy().to_string();
-
-    // https://github.com/vinzenz/gnome-shell/blob/master/data/org.gnome.Shell.Screenshot.xml
-    proxy.call_method("ScreenshotArea", &(x, y, width, height, false, &filename))?;
-
-    let rgba_image = png_to_rgba_image(&filename, 0, 0, width, height)?;
-
-    Ok(rgba_image)
+    // Create the RgbaImage from raw pixels
+    RgbaImage::from_raw(width as u32, height as u32, buffer)
+        .ok_or_else(|| XCapError::new("Failed to create image from raw pixels"))
 }
 
 #[derive(Deserialize, Type, Debug)]
@@ -132,9 +141,9 @@ pub fn wayland_capture(x: i32, y: i32, width: i32, height: i32) -> XCapResult<Rg
     let lock = DBUS_LOCK.lock();
 
     let conn = get_zbus_connection()?;
-    let res = org_gnome_shell_screenshot(conn, x, y, width, height)
+    let res = org_gnome_shell_screencast(conn, x, y, width, height)
         .or_else(|e| {
-            log::debug!("org_gnome_shell_screenshot failed {}", e);
+            log::debug!("org_gnome_shell_screencast failed {}", e);
 
             org_freedesktop_portal_screenshot(conn, x, y, width, height)
         })
@@ -147,6 +156,7 @@ pub fn wayland_capture(x: i32, y: i32, width: i32, height: i32) -> XCapResult<Rg
 
     res
 }
+
 #[test]
 fn screnshot_multithreaded() {
     fn make_screenshots() {
