@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fmt::Debug, fs, sync::Mutex};
+use std::{collections::HashMap, env::temp_dir, fmt::Debug, fs, sync::Mutex};
 use std::os::unix::io::{FromRawFd, AsRawFd};
 use std::io::Read;
 
@@ -16,6 +16,12 @@ use crate::{
 };
 
 use super::utils::{get_zbus_connection, png_to_rgba_image};
+
+#[derive(Deserialize, Type, Debug)]
+struct ScreencastResponse {
+    success: bool,
+    filename_used: String,
+}
 
 fn org_gnome_shell_screencast(
     conn: &Connection,
@@ -35,28 +41,20 @@ fn org_gnome_shell_screencast(
     let mut options = HashMap::new();
     options.insert("draw-cursor", Value::from(false));
     options.insert("framerate", Value::from(1u32)); // Single frame
-    // Use a pipeline that outputs raw RGBA pixels
-    let pipeline = format!(
-        "videoconvert ! video/x-raw,format=RGBA ! videoconvert ! appsink name=sink sync=false",
-    );
-    options.insert("pipeline", Value::from(pipeline.as_str()));
+    
+    // Use a simpler pipeline that just saves to memory
+    options.insert("pipeline", Value::from("vp8enc min_quantizer=13 max_quantizer=13 cpu-used=5 deadline=1000000 threads=%t ! queue ! webmmux"));
     
     // Start the screencast and get the raw pixel data
-    let response: (bool, OwnedFd) = proxy.call("ScreencastArea", &(x, y, width, height, "", options))?;
+    let response: ScreencastResponse = proxy.call("ScreencastArea", &(x, y, width, height, "", options))?;
     
-    if !response.0 {
+    if !response.success {
         return Err(XCapError::new("Failed to capture screen area"));
     }
 
-    // Read the raw RGBA pixels from the pipe
-    let fd = response.1;
-    let mut buffer = vec![0u8; (width * height * 4) as usize];
-    let mut file = unsafe { std::fs::File::from_raw_fd(fd.as_raw_fd()) };
-    file.read_exact(&mut buffer)?;
-
-    // Create the RgbaImage from raw pixels
-    RgbaImage::from_raw(width as u32, height as u32, buffer)
-        .ok_or_else(|| XCapError::new("Failed to create image from raw pixels"))
+    // Since we're using the default pipeline now, we need to read the file
+    let rgba_image = png_to_rgba_image(&response.filename_used, 0, 0, width, height)?;
+    Ok(rgba_image)
 }
 
 #[derive(Deserialize, Type, Debug)]
