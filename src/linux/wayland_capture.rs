@@ -42,7 +42,7 @@ fn org_gnome_shell_screencast(
     options.insert("pipeline", Value::from(pipeline.as_str()));
     
     // Start the screencast and get the raw pixel data
-    let response: (bool, OwnedFd) = proxy.call("ScreencastArea", &(x, y, width, height, options))?;
+    let response: (bool, OwnedFd) = proxy.call("ScreencastArea", &(x, y, width, height, "", options))?;
     
     if !response.0 {
         return Err(XCapError::new("Failed to capture screen area"));
