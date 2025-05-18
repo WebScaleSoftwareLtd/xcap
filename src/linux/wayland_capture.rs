@@ -1,4 +1,4 @@
-use std::{collections::HashMap, env::temp_dir, fmt::Debug, fs, sync::Mutex};
+use std::{collections::HashMap, env::temp_dir, fmt::Debug, fs, sync::Mutex, process::Command};
 use std::os::unix::io::{FromRawFd, AsRawFd};
 use std::io::Read;
 
@@ -41,19 +41,39 @@ fn org_gnome_shell_screencast(
     let mut options = HashMap::new();
     options.insert("draw-cursor", Value::from(false));
     options.insert("framerate", Value::from(1u32)); // Single frame
+
+    // Create a pipeline that captures one frame as PNG
+    let pipeline = "videoconvert ! pngenc compression-level=0 ! filesink";
+    options.insert("pipeline", Value::from(pipeline));
+
+    // Create a temporary file template
+    let dirname = temp_dir().join("screenshot");
+    fs::create_dir_all(&dirname)?;
+    let png_path = dirname.join(format!("{}.png", rand::random::<u32>()));
+    let file_template = png_path.to_str()
+        .ok_or_else(|| XCapError::new("Invalid path"))?
+        .to_string();
     
-    // Use a simpler pipeline that just saves to memory
-    options.insert("pipeline", Value::from("vp8enc min_quantizer=13 max_quantizer=13 cpu-used=5 deadline=1000000 threads=%t ! queue ! webmmux"));
+    // Ensure cleanup of temporary file
+    defer!({
+        let _ = fs::remove_file(&png_path);
+    });
     
-    // Start the screencast and get the raw pixel data
-    let response: ScreencastResponse = proxy.call("ScreencastArea", &(x, y, width, height, "", options))?;
+    // Start the screencast using PNG pipeline
+    let response: ScreencastResponse = proxy.call("ScreencastArea", &(x, y, width, height, &file_template, options))?;
     
     if !response.success {
         return Err(XCapError::new("Failed to capture screen area"));
     }
 
-    // Since we're using the default pipeline now, we need to read the file
-    let rgba_image = png_to_rgba_image(&response.filename_used, 0, 0, width, height)?;
+    // Stop the screencast since we only want one frame
+    let _: bool = proxy.call("StopScreencast", &())?;
+
+    // Read the PNG file
+    let rgba_image = png_to_rgba_image(
+        &response.filename_used,
+        0, 0, width, height,
+    )?;
     Ok(rgba_image)
 }
 
