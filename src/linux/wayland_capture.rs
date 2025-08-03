@@ -140,16 +140,34 @@ pub fn wayland_capture(x: i32, y: i32, width: i32, height: i32) -> XCapResult<Rg
     let lock = DBUS_LOCK.lock();
 
     let conn = get_zbus_connection()?;
-    let res = org_gnome_shell_screenshot(conn, x, y, width, height)
-        .or_else(|e| {
-            log::debug!("org_gnome_shell_screenshot failed {e}");
 
+    let desktop_env = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default().to_lowercase();
+    let res = {
+        let session_type = std::env::var("XDG_SESSION_TYPE").unwrap_or_default().to_lowercase();
+        
+        if desktop_env.contains("gnome") || desktop_env.contains("wayland") || session_type == "wayland" {
+            org_gnome_shell_screenshot(conn, x, y, width, height)
+        } else if desktop_env.contains("kde") || desktop_env.contains("plasma") {
             org_freedesktop_portal_screenshot(conn, x, y, width, height)
-        })
-        .or_else(|e| {
-            log::debug!("org_freedesktop_portal_screenshot failed {e}");
+        } else if desktop_env.contains("x11") || session_type == "x11" {
             wlroots_screenshot(x, y, width, height)
-        });
+        } else {
+            // 默认情况，尝试第一个方法
+            org_gnome_shell_screenshot(conn, x, y, width, height)
+        }
+    }
+    .or_else(|e| {
+        log::debug!("First method failed: {}", e);
+        if desktop_env.contains("kde") || desktop_env.contains("plasma") {
+            wlroots_screenshot(x, y, width, height)
+        } else {
+            org_freedesktop_portal_screenshot(conn, x, y, width, height)
+        }
+    })
+    .or_else(|e| {
+        log::debug!("Second method failed: {}", e);
+        wlroots_screenshot(x, y, width, height)
+    });
 
     drop(lock);
 
